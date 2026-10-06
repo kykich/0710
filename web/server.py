@@ -84,6 +84,26 @@ JSON-API:
                               "check"   — проверить модель эмбеддингов.
                               При ВКЛЮЧЁННОМ RAG найденный контекст
                               подмешивается в промпт (режим A2).
+    GET  /api/local         - состояние ЛОКАЛЬНОЙ модели: {enabled, root,
+                              server_path, params, models, servers,
+                              running, runtime}
+    POST /api/local         - {action, …} -> ЛОКАЛЬНАЯ модель (llama.cpp /
+                              Ollama / LM Studio) на этом компьютере:
+                              "state"  — вернуть состояние (по умолч.);
+                              "scan"   — просканировать КОРЕНЬ {root}: найти
+                                         сервер (llama-server.exe) и *.gguf,
+                                         предложить параметры запуска;
+                              "params" — подобрать параметры для {model}
+                                         (ngl — автоподбор по видеопамяти);
+                              "start"  — запустить сервер {server_path?,
+                                         params?}, дождаться готовности,
+                                         вернуть URL (…/v1); модель добавляется
+                                         в список источников агента;
+                              "stop"   — остановить сервер (вручную);
+                              "status" — проверить живость и список моделей;
+                              "models" — список моделей запущенного сервера;
+                              "set"    — сохранить {enabled?, root?,
+                                         server_path?, params?}.
     """
 import json
 import mimetypes
@@ -95,6 +115,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from rtk_app import config
 from rtk_app.agent import Agent
+from rtk_app import local_server
 from rtk_app.session_store import SessionStore
 
 try:
@@ -130,6 +151,15 @@ class _ServerState:
     composition_thread = None
     # Событие остановки тика композиции (устанавливается при выключении).
     composition_stop = None
+
+    # --- ЛОКАЛЬНАЯ МОДЕЛЬ (llama.cpp / Ollama) ---
+    # Менеджер процесса локального сервера (один процесс на сервер).
+    local_manager = None
+    # Кеш последнего сканирования корня (серверы, модели).
+    local_scan = None
+    # Последний статус запущенного сервера (runtime).
+    local_runtime = None
+    local_lock = threading.Lock()
 
 
 def _mcp_settings_file():
@@ -177,6 +207,75 @@ def _save_mcp_settings():
                       ensure_ascii=False, indent=2)
     except Exception as exc:
         print("[MCP] не удалось сохранить настройки: %s" % exc, flush=True)
+
+
+# ---------------------------------------------------------------------------
+# ЛОКАЛЬНАЯ МОДЕЛЬ: менеджер процесса + синхронизация с агентом
+# ---------------------------------------------------------------------------
+def _local_manager():
+    """Лениво создаёт и возвращает менеджер локального сервера (singleton)."""
+    if _ServerState.local_manager is None:
+        _ServerState.local_manager = local_server.LocalServerManager()
+    return _ServerState.local_manager
+
+
+def _local_status_payload():
+    """Состояние блока локальной модели для UI.
+
+    Включает: настройки (enabled/root/server_path/params), найденные модели
+    и серверы (из последнего сканирования), состояние процесса
+    (running/ready/url/pid) и список моделей запущенного сервера.
+    """
+    mgr = _local_manager()
+    settings = mgr.load_settings()
+    running = mgr.is_running()
+    runtime = mgr.status() if running else None
+    scan = _ServerState.local_scan or {}
+    return {
+        "ok": True,
+        "enabled": bool(settings.get("enabled")),
+        "root": settings.get("root") or "",
+        "server_path": settings.get("server_path") or "",
+        "params": settings.get("params") or {},
+        "models": scan.get("models", []) or [],
+        "servers": scan.get("servers", []) or [],
+        "managers": scan.get("managers", []) or [],
+        "running": running,
+        "runtime": runtime,
+    }
+
+
+def _sync_agent_local():
+    """Синхронизирует состав источников агента с локальной моделью.
+
+    Если локальная модель ВКЛЮЧЕНА (флаг enabled) — агент получает источник
+    "local" с URL и именем модели (появляется в селекторе). Иначе источник
+    убирается из состава агента.
+    """
+    agent = _ServerState.agent
+    if agent is None or not hasattr(agent, "set_local_model"):
+        return
+    settings = _local_manager().load_settings()
+    enabled = bool(settings.get("enabled"))
+    params = settings.get("params") or {}
+    url = None
+    model_name = None
+    if enabled:
+        h = params.get("host") or config.LOCAL_HOST
+        p = params.get("port") or config.LOCAL_PORT
+        url = local_server.server_url(h, p)
+        # Имя модели: сначала из /v1/models запущенного сервера, иначе из
+        # параметров (basename .gguf без расширения), иначе метка по умолчанию.
+        runtime = _local_manager().status()
+        rmodels = runtime.get("models") or []
+        if rmodels:
+            model_name = rmodels[0]
+        else:
+            model_path = params.get("model") or ""
+            model_name = (os.path.splitext(os.path.basename(model_path))[0]
+                          if model_path else config.LOCAL_LABEL)
+    agent.set_local_model(url=url, model=model_name,
+                          label=config.LOCAL_LABEL)
 
 def _mcp_state_payload(check=False):
     """Собирает состояние MCP для ответа клиенту.
@@ -615,6 +714,10 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             # Состояние RAG: настройки (enabled/docs_dir/top_k) + статистика
             # индекса (файлов, чанков, модель эмбеддингов, ошибки).
             return self._send_json(200, self.session.rag_status())
+        if path == "/api/local":
+            # Состояние блока ЛОКАЛЬНОЙ модели (llama.cpp/Ollama): настройки,
+            # найденные модели/серверы, состояние процесса, URL сервера.
+            return self._send_json(200, _local_status_payload())
         self._send_json(404, {"ok": False, "error": "Not Found"})
 
     def do_POST(self):
@@ -647,6 +750,8 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             return self._handle_mcp()
         if urllib.parse.urlparse(self.path).path == "/api/rag":
             return self._handle_rag()
+        if urllib.parse.urlparse(self.path).path == "/api/local":
+            return self._handle_local()
         self._send_json(404, {"ok": False, "error": "Not Found"})
 
     # ---------------- Статика ----------------
@@ -1661,6 +1766,133 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         # action == "state" и всё прочее — отдаём состояние.
         return self._send_json(200, self.session.rag_status())
 
+    def _handle_local(self):
+        """Управление ЛОКАЛЬНОЙ моделью (llama.cpp / Ollama / LM Studio).
+
+        Тело запроса (action определяет смысл):
+            "state"  — вернуть состояние блока (по умолчанию);
+            "scan"   — ПРОСКАНИРОВАТЬ папку {root}: найти сервер llama.cpp и
+                       *.gguf-модели, вернуть список + предложенные параметры;
+            "params" — подобрать параметры запуска для модели {model}
+                       (ngl — автоподбор по видеопамяти);
+            "start"  — ЗАПУСТИТЬ сервер {server_path?, params?}: поднять
+                       процесс, дождаться готовности, вернуть URL (…/v1);
+            "stop"   — остановить сервер (вручную);
+            "status" — проверить живость сервера и список его моделей;
+            "models" — список моделей запущенного сервера (GET /v1/models);
+            "set"    — сохранить настройки {enabled?, root?, server_path?,
+                       params?}.
+        """
+        data = self._read_json_body() or {}
+        action = str(data.get("action", "state")).strip().lower()
+        mgr = _local_manager()
+        with _ServerState.local_lock:
+            if action == "scan":
+                root = str(data.get("root") or "").strip()
+                if root:
+                    settings = mgr.load_settings()
+                    settings["root"] = root
+                    mgr.save_settings(settings)
+                scan = local_server.scan_root(root)
+                _ServerState.local_scan = scan
+                payload = _local_status_payload()
+                if scan.get("models"):
+                    payload["suggest"] = local_server.suggest_params(
+                        scan["models"][0]["path"])
+                payload["scan"] = scan
+                return self._send_json(200, payload)
+
+            if action == "params":
+                model_path = str(data.get("model") or "").strip()
+                if not model_path and _ServerState.local_scan:
+                    models = _ServerState.local_scan.get("models") or []
+                    if models:
+                        model_path = models[0]["path"]
+                if not model_path or not os.path.isfile(model_path):
+                    return self._send_json(
+                        400, {"ok": False, "error": "модель не найдена"})
+                params = local_server.suggest_params(model_path)
+                return self._send_json(200, {"ok": True, "params": params})
+
+            if action == "start":
+                params = dict(data.get("params") or {})
+                server_path = str(data.get("server_path")
+                                  or mgr.load_settings().get("server_path")
+                                  or "").strip()
+                if not server_path:
+                    scan = _ServerState.local_scan or local_server.scan_root(
+                        mgr.load_settings().get("root") or "")
+                    for s in scan.get("servers", []):
+                        if s.get("kind") == "llama.cpp":
+                            server_path = s.get("path")
+                            break
+                # Автоподбор параметров, если модель задана, а ngl не задан.
+                if params.get("model") and "ngl" not in params:
+                    sugg = local_server.suggest_params(params["model"])
+                    for k, v in sugg.items():
+                        params.setdefault(k, v)
+                result = mgr.start(server_path, params)
+                if result.get("ok"):
+                    settings = mgr.load_settings()
+                    settings["enabled"] = True
+                    settings["server_path"] = server_path
+                    settings["params"] = params
+                    mgr.save_settings(settings)
+                    _sync_agent_local()
+                    print("[LOCAL] сервер запущен: %s (pid=%s)"
+                          % (result.get("url"), result.get("pid")), flush=True)
+                else:
+                    print("[LOCAL] запуск не удался: %s"
+                          % result.get("error"), flush=True)
+                payload = _local_status_payload()
+                payload["start"] = result
+                return self._send_json(200, payload)
+
+            if action == "stop":
+                stopped = mgr.stop()
+                settings = mgr.load_settings()
+                settings["enabled"] = False
+                mgr.save_settings(settings)
+                _sync_agent_local()
+                print("[LOCAL] сервер остановлен (stopped=%s)." % stopped,
+                      flush=True)
+                payload = _local_status_payload()
+                payload["stopped"] = stopped
+                return self._send_json(200, payload)
+
+            if action == "status":
+                runtime = mgr.status()
+                _ServerState.local_runtime = runtime
+                _sync_agent_local()
+                payload = _local_status_payload()
+                payload["runtime"] = runtime
+                return self._send_json(200, payload)
+
+            if action == "models":
+                runtime = mgr.status()
+                return self._send_json(200, {"ok": True,
+                                             "models": runtime.get("models")
+                                             or []})
+
+            if action == "set":
+                settings = mgr.load_settings()
+                if "enabled" in data:
+                    settings["enabled"] = bool(data.get("enabled"))
+                if "root" in data:
+                    settings["root"] = str(data.get("root") or "")
+                if "server_path" in data:
+                    settings["server_path"] = str(data.get("server_path") or "")
+                if "params" in data and isinstance(data.get("params"), dict):
+                    merged = dict(settings.get("params") or {})
+                    merged.update(data.get("params") or {})
+                    settings["params"] = merged
+                mgr.save_settings(settings)
+                _sync_agent_local()
+                return self._send_json(200, _local_status_payload())
+
+            # action == "state" и всё прочее.
+            return self._send_json(200, _local_status_payload())
+
 
 def create_server(agent, host=None, port=None):
     """Создаёт HTTP-сервер, связанный с конкретным экземпляром агента."""
@@ -1756,6 +1988,14 @@ def serve(agent_or_key, host=None, port=None, open_page=True, agent=None):
     # Агент — отдельная сущность, построенная вокруг ключа либо переданная.
     if not isinstance(agent, Agent):
         agent = Agent(agent)
+
+    # ЛОКАЛЬНАЯ МОДЕЛЬ: если она была включена в прошлой сессии — добавляем
+    # её источник в состав агента (появится в селекторе моделей).
+    try:
+        _sync_agent_local()
+    except Exception as exc:
+        print("[LOCAL] не удалось подключить локальную модель: %s" % exc,
+              flush=True)
 
     httpd = create_server(agent, host, port)
     shown_host, shown_port = httpd.server_address[:2]

@@ -253,7 +253,83 @@
                         </div>
                         <span id="rag-status" class="rag-status">RAG выключен</span>
                     </div>
-                    <span class="side-note">модель эмбеддингов — Ollama nomic-embed-text-v2-moe; из PDF берётся только текст</span>
+                                        <span class="side-note">модель эмбеддингов — Ollama nomic-embed-text-v2-moe; из PDF берётся только текст</span>
+                </div>
+            </section>
+
+            <!-- ЛОКАЛЬНАЯ МОДЕЛЬ (llama.cpp / Ollama / LM Studio): запуск
+                 локального LLM-сервера на этом компьютере. Пользователь
+                 указывает КОРЕНЬ папки с сервером (llama-server.exe) и
+                 моделями (*.gguf), сканирует её, а параметры запуска
+                 подбираются автоматически (ngl — по свободной видеопамяти)
+                 и доступны для редактирования. После запуска источник
+                 «Local» появляется в списке моделей для запросов. -->
+            <section class="side-sec" data-section="local">
+                <button type="button" class="side-sec-head" aria-expanded="true">
+                    <span class="side-sec-caret">▾</span>
+                    <span class="side-sec-name">Локальная модель</span>
+                </button>
+                <div class="side-sec-body">
+                    <div class="local-box">
+                        <label class="local-toggle" title="Включить локальную модель в список моделей агента">
+                            <input type="checkbox" id="local-enabled">
+                            <span>Использовать локальную модель</span>
+                        </label>
+                        <label class="compact-label side-label">
+                            <span>корень папки</span>
+                            <input type="text" id="local-root" class="gen-input local-input"
+                                   placeholder="путь к папке с llama-server и моделями" maxlength="400">
+                        </label>
+                        <div class="local-status-row">
+                            <button id="local-scan" type="button" class="btn-side">Сканировать</button>
+                            <button id="local-start" type="button" class="btn-side primary">Запустить</button>
+                            <button id="local-stop" type="button" class="btn-side link">Остановить</button>
+                            <button id="local-status-btn" type="button" class="btn-side link">Статус</button>
+                        </div>
+                        <label class="compact-label side-label">
+                            <span>сервер</span>
+                            <select id="local-server" class="gen-input local-input"
+                                    title="Найденный исполняемый файл сервера (llama.cpp / ollama)"></select>
+                        </label>
+                        <label class="compact-label side-label">
+                            <span>модель</span>
+                            <select id="local-model" class="gen-input local-input"
+                                    title="Найденные файлы моделей (*.gguf)"></select>
+                        </label>
+                        <div class="local-params">
+                            <label class="compact-label side-label">
+                                <span>ctx</span>
+                                <input type="number" id="local-ctx" class="gen-input local-input"
+                                       min="512" max="131072" step="512" value="8192">
+                            </label>
+                            <label class="compact-label side-label">
+                                <span>ngl (слоёв на GPU)</span>
+                                <input type="number" id="local-ngl" class="gen-input local-input"
+                                       min="0" max="999" step="1" value="0">
+                            </label>
+                            <label class="compact-label side-label">
+                                <span>threads</span>
+                                <input type="number" id="local-threads" class="gen-input local-input"
+                                       min="0" max="256" step="1" value="0">
+                            </label>
+                            <label class="compact-label side-label">
+                                <span>порт</span>
+                                <input type="number" id="local-port" class="gen-input local-input"
+                                       min="1" max="65535" step="1" value="8080">
+                            </label>
+                            <label class="compact-label side-label">
+                                <span>flash-attn</span>
+                                <select id="local-flash" class="gen-input local-input">
+                                    <option value="auto">auto</option>
+                                    <option value="on">on</option>
+                                    <option value="off">off</option>
+                                </select>
+                            </label>
+                        </div>
+                        <div id="local-suggest" class="local-suggest" hidden></div>
+                        <span id="local-status" class="local-status">локальная модель не запущена</span>
+                    </div>
+                    <span class="side-note">llama.cpp / Ollama / LM Studio; ngl=0 — автоподбор по видеопамяти, запуск и остановка вручную</span>
                 </div>
             </section>
 

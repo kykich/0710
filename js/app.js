@@ -2236,6 +2236,266 @@
     }
 
     // ------------------------------------------------------------------
+    // ЛОКАЛЬНАЯ МОДЕЛЬ (llama.cpp / Ollama / LM Studio) — блок управления.
+    // См. POST/GET /api/local: scan (корень папки), params (автоподбор ngl по
+    // видеопамяти), start/stop/status, set (сохранение настроек). После запуска
+    // источник «Local» появляется в списке моделей агента.
+    var localEnabledEl = document.getElementById("local-enabled");
+    var localRootEl = document.getElementById("local-root");
+    var localServerSel = document.getElementById("local-server");
+    var localModelSel = document.getElementById("local-model");
+    var localScanBtn = document.getElementById("local-scan");
+    var localStartBtn = document.getElementById("local-start");
+    var localStopBtn = document.getElementById("local-stop");
+    var localStatusBtn = document.getElementById("local-status-btn");
+    var localSuggestEl = document.getElementById("local-suggest");
+    var localStatusEl = document.getElementById("local-status");
+    var localCtxEl = document.getElementById("local-ctx");
+    var localNglEl = document.getElementById("local-ngl");
+    var localThreadsEl = document.getElementById("local-threads");
+    var localPortEl = document.getElementById("local-port");
+    var localFlashEl = document.getElementById("local-flash");
+
+    // Локальный снимок состояния блока.
+    var localState = { enabled: false, root: "", server_path: "",
+                       models: [], servers: [], running: false,
+                       runtime: null, params: {} };
+
+    // Читает параметры запуска из полей формы.
+    function localParamsFromForm() {
+        return {
+            model: localModelSel ? localModelSel.value : "",
+            ctx: parseInt(localCtxEl ? localCtxEl.value : 8192, 10) || 8192,
+            ngl: parseInt(localNglEl ? localNglEl.value : 0, 10) || 0,
+            threads: parseInt(localThreadsEl ? localThreadsEl.value : 0, 10) || 0,
+            port: parseInt(localPortEl ? localPortEl.value : 8080, 10) || 8080,
+            flash_attn: localFlashEl ? localFlashEl.value : "auto",
+        };
+    }
+
+    // Показывает строку статуса блока (запущен/нет + URL).
+    function renderLocalStatus(extraText) {
+        if (!localStatusEl) return;
+        var parts = [];
+        if (localState.running) {
+            var rt = localState.runtime || {};
+            parts.push("запущен");
+            if (rt.url) parts.push(rt.url);
+            if (rt.pid) parts.push("pid " + rt.pid);
+            if (rt.ready === false) parts.push("не отвечает");
+        } else {
+            parts.push("локальная модель не запущена");
+        }
+        if (localState.models && localState.models.length) {
+            parts.push("моделей найдено: " + localState.models.length);
+        }
+        if (extraText) parts.push(extraText);
+        localStatusEl.textContent = parts.join(" · ");
+        localStatusEl.className = "local-status " +
+            (localState.running ? "ok" : "");
+    }
+
+    // Заполняет селекты серверов и моделей из результатов сканирования.
+    function fillLocalSelects() {
+        if (localServerSel) {
+            var cur = localState.server_path || localServerSel.value || "";
+            localServerSel.innerHTML = "";
+            (localState.servers || []).forEach(function (s) {
+                var o = document.createElement("option");
+                o.value = s.path;
+                o.textContent = (s.kind || "") + ": " + (s.name || s.path);
+                localServerSel.appendChild(o);
+            });
+            if (cur) localServerSel.value = cur;
+            localState.server_path = localServerSel.value || "";
+        }
+        if (localModelSel) {
+            var curM = localModelSel.value || "";
+            localModelSel.innerHTML = "";
+            (localState.models || []).forEach(function (m) {
+                var o = document.createElement("option");
+                o.value = m.path;
+                o.textContent = (m.name || m.path) +
+                    (m.size_mb ? " (" + m.size_mb + " МБ)" : "");
+                localModelSel.appendChild(o);
+            });
+            if (curM) localModelSel.value = curM;
+        }
+    }
+
+    // Применяет состояние блока локальной модели, пришедшее от сервера.
+    function applyLocalState(d) {
+        if (!d) return;
+        localState.enabled = !!d.enabled;
+        localState.root = d.root || "";
+        localState.server_path = d.server_path || "";
+        localState.models = d.models || [];
+        localState.servers = d.servers || [];
+        localState.running = !!d.running;
+        localState.runtime = d.runtime || null;
+        if (d.params) localState.params = d.params;
+
+        if (localEnabledEl) localEnabledEl.checked = localState.enabled;
+        if (localRootEl && document.activeElement !== localRootEl) {
+            localRootEl.value = localState.root || "";
+        }
+        fillLocalSelects();
+        // Параметры из снимка (если пришли) — подставляем, не затирая ввод.
+        var p = localState.params || {};
+        if (localCtxEl && document.activeElement !== localCtxEl && p.ctx) {
+            localCtxEl.value = p.ctx;
+        }
+        if (localNglEl && document.activeElement !== localNglEl &&
+                p.ngl !== undefined) {
+            localNglEl.value = p.ngl;
+        }
+        if (localThreadsEl && document.activeElement !== localThreadsEl && p.threads) {
+            localThreadsEl.value = p.threads;
+        }
+        if (localPortEl && document.activeElement !== localPortEl && p.port) {
+            localPortEl.value = p.port;
+        }
+        if (localFlashEl && p.flash_attn) localFlashEl.value = p.flash_attn;
+
+        // Результат запуска (если пришёл) — показываем отдельно.
+        if (d.start) {
+            if (d.start.ok) {
+                setStatus("Локальная модель запущена: " + (d.start.url || ""), "ok");
+            } else {
+                setStatus("Не удалось запустить локальную модель: " +
+                          (d.start.error || "?"), "error");
+            }
+        }
+        // Подбор параметров (при сканировании) — показываем подсказку.
+        if (d.suggest && localSuggestEl) {
+            var s = d.suggest;
+            localSuggestEl.hidden = false;
+            localSuggestEl.textContent = "подобрано: ngl=" + s.ngl +
+                (s.ngl_auto ? " (авто)" : "") + ", ctx=" + s.ctx +
+                ", threads=" + s.threads +
+                (s.vram_free_mb ? ", VRAM~" + s.vram_free_mb + " МБ" : "");
+            // Подставляем предложенные параметры в поля.
+            if (localCtxEl) localCtxEl.value = s.ctx;
+            if (localNglEl) localNglEl.value = s.ngl;
+            if (localThreadsEl) localThreadsEl.value = s.threads;
+            if (localPortEl) localPortEl.value = s.port;
+            if (localFlashEl && s.flash_attn) localFlashEl.value = s.flash_attn;
+        }
+        renderLocalStatus();
+        refreshSections();
+    }
+
+    // Отправляет действие с локальной моделью на сервер.
+    function localAction(action, extra, done) {
+        var payload = { action: action };
+        if (extra) {
+            Object.keys(extra).forEach(function (k) { payload[k] = extra[k]; });
+        }
+        return fetch("/api/local", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) { if (d) applyLocalState(d); if (done) done(d); return d; })
+        .catch(function () { if (done) done(null); return null; });
+    }
+
+    // Загружает состояние блока при старте страницы.
+    function initLocal() {
+        fetch("/api/local")
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (d) { if (d) applyLocalState(d); })
+            .catch(function () {});
+    }
+
+    if (localEnabledEl) {
+        localEnabledEl.addEventListener("change", function () {
+            var on = localEnabledEl.checked;
+            localAction("set", { enabled: on });
+            setStatus(on ? "Локальная модель включена."
+                         : "Локальная модель выключена.", "ok");
+        });
+    }
+    if (localScanBtn) {
+        localScanBtn.addEventListener("click", function () {
+            var root = localRootEl ? localRootEl.value.trim() : "";
+            if (!root) { setStatus("Укажите путь к папке моделей.", "error"); return; }
+            localScanBtn.disabled = true;
+            if (localStatusEl) {
+                localStatusEl.textContent = "сканирую папку…";
+                localStatusEl.className = "local-status warn";
+            }
+            localAction("scan", { root: root }, function (d) {
+                localScanBtn.disabled = false;
+                if (d && d.scan && d.scan.ok) {
+                    setStatus("Найдено моделей: " + (d.scan.models || []).length +
+                              ", серверов: " + (d.scan.servers || []).length, "ok");
+                } else {
+                    setStatus("В папке не найдено ни моделей, ни сервера.", "error");
+                }
+            });
+        });
+    }
+    if (localRootEl) {
+        var saveLocalRoot = function () {
+            var root = (localRootEl.value || "").trim();
+            if (!root) return;
+            localAction("set", { root: root });
+        };
+        localRootEl.addEventListener("blur", saveLocalRoot);
+        localRootEl.addEventListener("keydown", function (e) {
+            if (e.key === "Enter") { e.preventDefault(); saveLocalRoot(); }
+        });
+    }
+    if (localServerSel) {
+        localServerSel.addEventListener("change", function () {
+            localState.server_path = localServerSel.value || "";
+            localAction("set", { server_path: localState.server_path });
+        });
+    }
+    if (localStartBtn) {
+        localStartBtn.addEventListener("click", function () {
+            var params = localParamsFromForm();
+            if (!params.model) {
+                setStatus("Сначала отсканируйте папку и выберите модель.", "error");
+                return;
+            }
+            localStartBtn.disabled = true;
+            if (localStatusEl) {
+                localStatusEl.textContent = "запускаю сервер… (загрузка модели)";
+                localStatusEl.className = "local-status warn";
+            }
+            setStatus("Локальная модель: запуск сервера…", "");
+            localAction("start", { server_path: localState.server_path,
+                                   params: params }, function () {
+                localStartBtn.disabled = false;
+            });
+        });
+    }
+    if (localStopBtn) {
+        localStopBtn.addEventListener("click", function () {
+            localStopBtn.disabled = true;
+            localAction("stop", null, function () {
+                localStopBtn.disabled = false;
+                setStatus("Локальная модель остановлена.", "ok");
+            });
+        });
+    }
+    if (localStatusBtn) {
+        localStatusBtn.addEventListener("click", function () {
+            localAction("status");
+        });
+    }
+    // Поля параметров: сохраняем в настройки при изменении.
+    [localCtxEl, localNglEl, localThreadsEl, localPortEl, localFlashEl]
+        .forEach(function (el) {
+            if (!el) return;
+            el.addEventListener("change", function () {
+                localAction("set", { params: localParamsFromForm() });
+            });
+        });
+
     // Сворачиваемые секции левой колонки
     // ------------------------------------------------------------------
     // Каждый блок левой колонки (.side-sec) прячется под заголовком-кнопкой
@@ -2268,6 +2528,10 @@
                 case "rag":
                     // RAG активен, если включён И в индексе есть фрагменты.
                     return !!(ragState && ragState.enabled && ragState.available);
+                case "local":
+                    // Активность: локальная модель включена или сервер запущен.
+                    return !!(localState &&
+                              (localState.enabled || localState.running));
                 case "summary":
                     return !!(compactState && parseInt(compactState.keep, 10) > 0);
                 case "memory":
@@ -2336,6 +2600,8 @@
     initMcp();
     // Настраиваем RAG (вкл/выкл, папка PDF, top-k) и читаем статус индекса.
     initRag();
+    // Настраиваем ЛОКАЛЬНУЮ модель (llama.cpp/Ollama) и читаем её состояние.
+    initLocal();
     renderModelsTitle();
     resetContextStats();
     // Показываем панели facts/веток согласно активной стратегии.

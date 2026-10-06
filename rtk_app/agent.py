@@ -17,7 +17,7 @@ import urllib.parse
 from datetime import datetime, timedelta
 
 from . import rag_llm
-from . import config, deepseek, gigachat, html_report
+from . import config, deepseek, gigachat, html_report, local_llm
 
 __all__ = ["Agent"]
 
@@ -67,6 +67,35 @@ SOURCES = (
     ("gigachat", config.GC_MODEL, "GigaChat", "gc-base"),
 )
 
+
+def build_sources(local_url=None, local_model=None, local_label=None):
+    """Собирает список источников, добавляя ЛОКАЛЬНУЮ модель (если задана).
+
+    Базовые источники — DeepSeek и GigaChat (SOURCES). Если передан
+    local_url (базовый URL локального сервера, напр. http://localhost:8080/v1)
+    — добавляется провайдер "local" с меткой local_label (по умолчанию
+    config.LOCAL_LABEL). Для провайдера "local" в поле model кортежа храним
+    "<base_url>|<model>": URL нужен клиенту, имя — в запрос (разбирается в
+    parse_local_model_field).
+    """
+    srcs = list(SOURCES)
+    if local_url and str(local_url).strip():
+        label = str(local_label or config.LOCAL_LABEL).strip() or "Local"
+        model_field = "%s|%s" % (str(local_url).strip(),
+                                 str(local_model or "").strip())
+        srcs.append(("local", model_field, label, config.LOCAL_CLS))
+    return srcs
+
+
+def parse_local_model_field(model_field):
+    """Разбирает поле модели локального источника "URL|ИМЯ" -> (url, name)."""
+    s = str(model_field or "")
+    if "|" in s:
+        url, name = s.split("|", 1)
+        return url.strip(), name.strip()
+    return s.strip(), ""
+
+
 # Системный промпт агента (роль). Ставится в начало каждого диалога.
 SYSTEM_PROMPT = ("Ты — дружелюбный ассистент. Отвечай по-русски, понятно и "
                  "структурированно, следуя запросам пользователя.")
@@ -98,6 +127,43 @@ class Agent:
         """
         self.api_key = api_key
         self.sources = list(sources or SOURCES)
+        # Настройки ЛОКАЛЬНОЙ модели (URL сервера + имя модели для запроса).
+        # Если заданы — источник "local" добавляется динамически (см.
+        # set_local_model), чтобы появляться в списке доступных моделей без
+        # пересоздания агента.
+        self._local_url = ""
+        self._local_model = ""
+        self._local_label = config.LOCAL_LABEL
+        self._rebuild_sources()
+
+    def set_local_model(self, url=None, model=None, label=None):
+        """Включает/обновляет ЛОКАЛЬНУЮ модель в списке источников агента.
+
+        url    — базовый URL локального сервера (…/v1) или None/"" (выключить);
+        model  — имя модели, которое отдаёт сервер (для поля model в запросе);
+        label  — метка для селектора/карточки (по умолчанию config.LOCAL_LABEL).
+
+        Пустой url убирает локальную модель из состава агента.
+        """
+        self._local_url = str(url or "").strip()
+        self._local_model = str(model or "").strip()
+        if label is not None:
+            self._local_label = str(label or config.LOCAL_LABEL).strip() \
+                or config.LOCAL_LABEL
+        self._rebuild_sources()
+
+    def _rebuild_sources(self):
+        """Пересобирает список источников с учётом локальной модели."""
+        # Кастомный набор источников не подмешивает глобальные SOURCES.
+        if self.sources and self.sources != list(SOURCES):
+            srcs = list(self.sources)
+        else:
+            srcs = list(SOURCES)
+        if self._local_url:
+            model_field = "%s|%s" % (self._local_url, self._local_model)
+            srcs.append(("local", model_field, self._local_label,
+                         config.LOCAL_CLS))
+        self.sources = srcs
         self.enabled_models = [s[2] for s in self.sources]
         # Индекс доступных моделей по их метке (label) для быстрого выбора
         # по имени в запросе пользователя.
@@ -114,12 +180,18 @@ class Agent:
         """Список моделей, которые умеет обслуживать агент (метаданные для UI)."""
         out = []
         for provider, model, label, cls in self.sources:
-            out.append({
+            item = {
                 "label": label,
                 "cls": cls,
                 "provider": provider,
                 "model": model,
-            })
+            }
+            if provider == "local":
+                url, name = parse_local_model_field(model)
+                item["local"] = True
+                item["url"] = url
+                item["model"] = name or label
+            out.append(item)
         return out
 
     def _coerce_temperature(self, value):
@@ -1115,6 +1187,17 @@ class Agent:
         provider, name, _lbl, _cls = base
         return provider, name
 
+    def _local_defaults(self):
+        """URL и имя локальной модели по умолчанию (из источников агента).
+
+        Возвращает (url, model_name). Если локального источника в составе
+        агента нет — пустые строки.
+        """
+        base = self.by_label.get(self._local_label)
+        if base and base[0] == "local":
+            return parse_local_model_field(base[1])
+        return "", ""
+
     def _chat_text(self, provider, model, messages, temperature=None,
                    max_tokens=None):
         """Вызывает одну модель и возвращает её ответ (dict с content/tokens).
@@ -1126,6 +1209,14 @@ class Agent:
         if provider == "deepseek":
             return deepseek.chat(self.api_key, messages, model=model,
                                  temperature=temperature, max_tokens=max_tokens)
+        if provider == "local":
+            url, name = parse_local_model_field(model)
+            if not url:
+                url, name = self._local_defaults()
+            return local_llm.chat(messages, model=name or config.LOCAL_LABEL,
+                                  base_url=url, api_key=config.LOCAL_API_KEY,
+                                  temperature=temperature,
+                                  max_tokens=max_tokens)
         return gigachat.chat(messages, model=model,
                              temperature=temperature, max_tokens=max_tokens)
 
@@ -1254,6 +1345,14 @@ class Agent:
                 res = deepseek.chat(self.api_key, messages,
                                     model=model, temperature=temperature,
                                     max_tokens=max_tokens)
+            elif provider == "local":
+                url, name = parse_local_model_field(model)
+                if not url:
+                    url, name = self._local_defaults()
+                res = local_llm.chat(
+                    messages, model=name or config.LOCAL_LABEL, base_url=url,
+                    api_key=config.LOCAL_API_KEY, temperature=temperature,
+                    max_tokens=max_tokens)
             else:
                 res = gigachat.chat(messages, model=model,
                                     temperature=temperature,

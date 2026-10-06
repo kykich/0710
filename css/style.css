@@ -1516,6 +1516,77 @@ body { font-family: 'Segoe UI', Arial, sans-serif; color: var(--text); overflow:
 .rag-status.warn { color: #e0c07a; }
 .rag-status.error { color: #f08a86; }
 
+/* ===== ЛОКАЛЬНАЯ МОДЕЛЬ (llama.cpp / Ollama / LM Studio) ===== */
+/* Блок в левой колонке по образцу MCP/RAG: переключатель, поля и селекты,
+   группа параметров запуска (ctx/ngl/threads/порт/flash-attn) и строка
+   статуса. Параметры — сетка в две колонки. */
+.local-box {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 4px;
+}
+.local-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: .76rem;
+    color: #cfd6ea;
+    cursor: pointer;
+}
+.local-toggle input { cursor: pointer; width: auto; }
+.local-box .side-label {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 3px;
+}
+.local-input {
+    width: 100%;
+    font: inherit;
+    font-size: .74rem;
+    color: #eaeefb;
+    background: #343c52;
+    border: 1px solid #3d4763;
+    border-radius: 6px;
+    padding: 4px 6px;
+}
+.local-status-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+.local-status-row .btn-side {
+    flex: 0 0 auto;
+    width: auto;
+    font-size: .7rem;
+    padding: 5px 8px;
+}
+/* Сетка параметров запуска: два поля в строке. */
+.local-params {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+}
+.local-suggest {
+    font-size: .68rem;
+    color: #9fb4e6;
+    background: #2b3346;
+    border-radius: 6px;
+    padding: 4px 6px;
+    word-break: break-word;
+}
+.local-status {
+    font-size: .68rem;
+    color: #8a92a6;
+    line-height: 1.35;
+    word-break: break-word;
+}
+.local-status.ok { color: #7bd88f; }
+.local-status.warn { color: #e0c07a; }
+.local-status.error { color: #f08a86; }
+
 /* ===== Доска (task5): таблица «событие ↔ курс валюты» ===== */
 .msg.a .board-table {
     width: 100%;
